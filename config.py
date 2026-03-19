@@ -8,6 +8,6 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_PATH = os.getenv("DATABASE_PATH", "blueprint_bot.db")
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 
-GEMINI_MODEL = "gemini-2.5-flash-preview-04-17"
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
 MAX_IMAGE_SIZE = (2048, 2048)
 CONFIDENCE_THRESHOLD = 0.75

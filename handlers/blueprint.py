@@ -163,7 +163,16 @@ async def process_blueprint(message: Message, state: FSMContext, bot: Bot) -> No
             recognized_data = await ai_recognizer.recognize(processed.image_bytes, scale)
         except AIServiceError as exc:
             logger.error("Ошибка AI-сервиса: %s", exc)
-            await message.answer("❌ Ошибка сервиса распознавания. Попробуйте позже.")
+            error_hint = str(exc)
+            if "API_KEY" in error_hint.upper() or "api key" in error_hint.lower():
+                user_msg = "❌ Ошибка API-ключа Gemini. Проверьте GEMINI_API_KEY."
+            elif "quota" in error_hint.lower() or "429" in error_hint:
+                user_msg = "❌ Превышена квота Gemini API. Попробуйте позже."
+            elif "blocked" in error_hint.lower() or "unavailable" in error_hint.lower():
+                user_msg = "❌ Gemini API недоступен в вашем регионе или модель заблокирована."
+            else:
+                user_msg = f"❌ Ошибка сервиса распознавания. Попробуйте позже.\n<code>{error_hint[:200]}</code>"
+            await message.answer(user_msg, parse_mode="HTML")
             await state.set_state(BlueprintStates.WAITING_PHOTO)
             return
 

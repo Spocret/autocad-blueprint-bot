@@ -13,6 +13,13 @@ from PIL import Image
 
 from config import GEMINI_API_KEY, GEMINI_MODEL, CONFIDENCE_THRESHOLD
 
+GEMINI_FALLBACK_MODELS = [
+    GEMINI_MODEL,
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.0-pro-vision-latest",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -26,9 +33,12 @@ class AIRecognizer:
 
     def __init__(self):
         """Инициализация клиента Google Gemini."""
+        if not GEMINI_API_KEY:
+            raise AIServiceError("GEMINI_API_KEY не задан в переменных окружения.")
         try:
             genai.configure(api_key=GEMINI_API_KEY)
             self.model = genai.GenerativeModel(GEMINI_MODEL)
+            self._active_model_name = GEMINI_MODEL
             logger.info("AIRecognizer инициализирован: модель=%s", GEMINI_MODEL)
         except Exception as exc:
             logger.exception("Ошибка инициализации AIRecognizer: %s", exc)
@@ -59,20 +69,41 @@ class AIRecognizer:
         # 2. Формируем prompt
         prompt_text = self._build_prompt(scale)
 
-        # 3. Вызываем Gemini API с изображением
-        try:
-            logger.info("Отправка запроса к Gemini '%s'...", GEMINI_MODEL)
-            response = await self.model.generate_content_async(
-                [pil_image, prompt_text],
-                generation_config=genai.GenerationConfig(
-                    temperature=0.1,
-                    max_output_tokens=8192,
-                ),
+        # 3. Вызываем Gemini API с изображением (с fallback по моделям)
+        response = None
+        last_exc: Exception | None = None
+        tried_models = []
+
+        for model_name in dict.fromkeys(GEMINI_FALLBACK_MODELS):
+            tried_models.append(model_name)
+            try:
+                logger.info("Отправка запроса к Gemini '%s'...", model_name)
+                model = genai.GenerativeModel(model_name)
+                response = await model.generate_content_async(
+                    [pil_image, prompt_text],
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    ),
+                )
+                self._active_model_name = model_name
+                logger.info("Ответ от Gemini получен успешно (модель: %s).", model_name)
+                break
+            except Exception as exc:
+                last_exc = exc
+                logger.warning(
+                    "Модель '%s' недоступна: %s. Пробую следующую...", model_name, exc
+                )
+
+        if response is None:
+            logger.error(
+                "Все модели Gemini недоступны. Попытки: %s. Последняя ошибка: %s",
+                tried_models,
+                last_exc,
             )
-            logger.info("Ответ от Gemini получен успешно.")
-        except Exception as exc:
-            logger.exception("Ошибка при обращении к Gemini API: %s", exc)
-            raise AIServiceError(f"Gemini API недоступен или вернул ошибку: {exc}") from exc
+            raise AIServiceError(
+                f"Gemini API недоступен (модели: {tried_models}). Ошибка: {last_exc}"
+            ) from last_exc
 
         # 4. Извлекаем текст ответа
         try:
