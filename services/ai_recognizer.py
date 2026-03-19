@@ -15,9 +15,10 @@ from config import GEMINI_API_KEY, GEMINI_MODEL, CONFIDENCE_THRESHOLD
 
 GEMINI_FALLBACK_MODELS = [
     GEMINI_MODEL,
+    "gemini-2.0-flash",
+    "gemini-2.0-flash-exp",
     "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.0-pro-vision-latest",
+    "gemini-1.5-pro",
 ]
 
 logger = logging.getLogger(__name__)
@@ -71,11 +72,9 @@ class AIRecognizer:
 
         # 3. Вызываем Gemini API с изображением (с fallback по моделям)
         response = None
-        last_exc: Exception | None = None
-        tried_models = []
+        errors: dict[str, str] = {}
 
         for model_name in dict.fromkeys(GEMINI_FALLBACK_MODELS):
-            tried_models.append(model_name)
             try:
                 logger.info("Отправка запроса к Gemini '%s'...", model_name)
                 model = genai.GenerativeModel(model_name)
@@ -90,20 +89,15 @@ class AIRecognizer:
                 logger.info("Ответ от Gemini получен успешно (модель: %s).", model_name)
                 break
             except Exception as exc:
-                last_exc = exc
-                logger.warning(
-                    "Модель '%s' недоступна: %s. Пробую следующую...", model_name, exc
-                )
+                errors[model_name] = str(exc)
+                logger.warning("Модель '%s' недоступна: %s", model_name, exc)
 
         if response is None:
-            logger.error(
-                "Все модели Gemini недоступны. Попытки: %s. Последняя ошибка: %s",
-                tried_models,
-                last_exc,
-            )
+            error_details = "; ".join(f"{m}: {e}" for m, e in errors.items())
+            logger.error("Все модели Gemini недоступны. Детали: %s", error_details)
             raise AIServiceError(
-                f"Gemini API недоступен (модели: {tried_models}). Ошибка: {last_exc}"
-            ) from last_exc
+                f"Все модели Gemini недоступны.\n{error_details}"
+            )
 
         # 4. Извлекаем текст ответа
         try:
