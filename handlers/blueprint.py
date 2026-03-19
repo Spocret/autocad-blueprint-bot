@@ -166,8 +166,8 @@ async def process_blueprint(message: Message, state: FSMContext, bot: Bot) -> No
             error_hint = str(exc)
             if "API_KEY" in error_hint.upper() or "api key" in error_hint.lower():
                 user_msg = "❌ Ошибка API-ключа Gemini. Проверьте GEMINI_API_KEY."
-            elif "quota" in error_hint.lower() or "429" in error_hint:
-                user_msg = "❌ Превышена квота Gemini API. Попробуйте позже."
+            elif "quota" in error_hint.lower() or "429" in error_hint or "resource exhausted" in error_hint.lower():
+                user_msg = "❌ Превышена квота Gemini API (лимит бесплатного тарифа).\nПодождите 1–2 минуты и попробуйте снова."
             elif "blocked" in error_hint.lower() or "unavailable" in error_hint.lower():
                 user_msg = "❌ Gemini API недоступен в вашем регионе или модель заблокирована."
             else:

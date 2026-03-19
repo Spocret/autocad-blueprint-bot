@@ -2,6 +2,7 @@
 Сервис AI-распознавания архитектурных чертежей через Google Gemini API.
 """
 
+import asyncio
 import io
 import json
 import logging
@@ -75,22 +76,11 @@ class AIRecognizer:
         errors: dict[str, str] = {}
 
         for model_name in dict.fromkeys(GEMINI_FALLBACK_MODELS):
-            try:
-                logger.info("Отправка запроса к Gemini '%s'...", model_name)
-                model = genai.GenerativeModel(model_name)
-                response = await model.generate_content_async(
-                    [pil_image, prompt_text],
-                    generation_config=genai.GenerationConfig(
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                    ),
-                )
+            response = await self._call_with_retry(model_name, pil_image, prompt_text, errors)
+            if response is not None:
                 self._active_model_name = model_name
                 logger.info("Ответ от Gemini получен успешно (модель: %s).", model_name)
                 break
-            except Exception as exc:
-                errors[model_name] = str(exc)
-                logger.warning("Модель '%s' недоступна: %s", model_name, exc)
 
         if response is None:
             error_details = "; ".join(f"{m}: {e}" for m, e in errors.items())
@@ -137,6 +127,51 @@ class AIRecognizer:
         )
 
         return data
+
+    async def _call_with_retry(
+        self,
+        model_name: str,
+        pil_image,
+        prompt_text: str,
+        errors: dict,
+        max_retries: int = 3,
+        base_delay: float = 10.0,
+    ):
+        """
+        Вызывает Gemini API с retry при ошибке квоты (429).
+        При других ошибках сразу записывает в errors и возвращает None.
+        """
+        for attempt in range(1, max_retries + 1):
+            try:
+                logger.info(
+                    "Отправка запроса к Gemini '%s' (попытка %d/%d)...",
+                    model_name, attempt, max_retries,
+                )
+                model = genai.GenerativeModel(model_name)
+                response = await model.generate_content_async(
+                    [pil_image, prompt_text],
+                    generation_config=genai.GenerationConfig(
+                        temperature=0.1,
+                        max_output_tokens=8192,
+                    ),
+                )
+                return response
+            except Exception as exc:
+                exc_str = str(exc)
+                is_quota = "429" in exc_str or "quota" in exc_str.lower() or "resource exhausted" in exc_str.lower()
+
+                if is_quota and attempt < max_retries:
+                    delay = base_delay * attempt
+                    logger.warning(
+                        "Квота Gemini '%s' исчерпана (попытка %d/%d). Жду %.0f сек...",
+                        model_name, attempt, max_retries, delay,
+                    )
+                    await asyncio.sleep(delay)
+                else:
+                    errors[model_name] = exc_str
+                    logger.warning("Модель '%s' недоступна: %s", model_name, exc_str)
+                    return None
+        return None
 
     def _build_prompt(self, scale: Optional[str]) -> str:
         """
