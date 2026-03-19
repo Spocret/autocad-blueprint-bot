@@ -80,6 +80,40 @@ blueprint_bot/
     └── gost_styles.py   # стили ГОСТ
 ```
 
+## Диагностика
+
+Перед первым запуском (или при проблемах с API) выполни диагностику окружения:
+
+```bash
+python diagnose.py
+```
+
+Скрипт проверяет:
+
+- наличие `.env` и обязательных переменных (`BOT_TOKEN`, `GEMINI_API_KEY`)
+- подключение к Telegram API (`getMe`)
+- доступность каждой модели Gemini (`gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`)
+
+Пример вывода:
+
+```
+✅ BOT_TOKEN: OK (bot: @myblueprint_bot)
+✅ GEMINI_API_KEY: задан
+✅ gemini-2.5-flash: доступна (ответ за 1.3с)
+✅ gemini-2.5-flash-lite: доступна (ответ за 0.9с)
+❌ gemini-2.5-pro: 403 permission denied — модель недоступна для вашего ключа
+
+✅ Рекомендуемая модель: gemini-2.5-flash
+   Укажите в .env: GEMINI_MODEL=gemini-2.5-flash
+```
+
+Зависимости скрипта уже входят в `requirements.txt` (`python-dotenv`, `google-generativeai`).
+Дополнительно нужен `requests`:
+
+```bash
+pip install requests
+```
+
 ## Технологии
 
 - Python 3.11+

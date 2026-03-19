@@ -20,6 +20,7 @@ from aiogram.types import (
     Message,
 )
 
+from config import OUTPUTS_DIR
 from models.database import db
 from services.ai_recognizer import AIServiceError, ai_recognizer
 from services.dxf_generator import dxf_generator
@@ -92,6 +93,11 @@ async def photo_handler(message: Message, state: FSMContext, bot: Bot) -> None:
     Скачивает байты и передаёт управление process_blueprint().
     """
     try:
+        current_state = await state.get_state()
+        if current_state == BlueprintStates.PROCESSING.state:
+            await message.answer("⏳ Уже обрабатываю предыдущее фото, подождите...")
+            return
+
         await message.answer("⏳ Обрабатываю чертёж...")
         await state.set_state(BlueprintStates.PROCESSING)
 
@@ -101,7 +107,7 @@ async def photo_handler(message: Message, state: FSMContext, bot: Bot) -> None:
         await bot.download(photo, destination=buf)
         photo_bytes = buf.getvalue()
 
-        await state.update_data(photo_bytes=photo_bytes)
+        await state.update_data(photo_bytes=photo_bytes, user_id=message.from_user.id)
         logger.info("Пользователь %s отправил фото (%d байт)", message.from_user.id, len(photo_bytes))
 
         await process_blueprint(message, state, bot)
@@ -134,6 +140,8 @@ async def process_blueprint(message: Message, state: FSMContext, bot: Bot) -> No
             await message.answer("❌ Не удалось обработать изображение. Попробуйте другое фото.")
             await state.set_state(BlueprintStates.WAITING_PHOTO)
             return
+        finally:
+            await state.update_data(photo_bytes=None)
 
         if not processed.is_valid:
             issues = ", ".join(processed.quality_issues) if processed.quality_issues else "неизвестные проблемы"
@@ -200,7 +208,7 @@ async def process_blueprint(message: Message, state: FSMContext, bot: Bot) -> No
 # Шаг 3: выбор масштаба через кнопки
 # ─────────────────────────────────────────
 
-@router.callback_query(F.data.startswith("scale:"))
+@router.callback_query(BlueprintStates.WAITING_PHOTO, F.data.startswith("scale:"))
 async def scale_callback(callback: CallbackQuery, state: FSMContext, bot: Bot) -> None:
     """Обработка выбора масштаба через инлайн-кнопки."""
     try:
@@ -345,6 +353,9 @@ async def clarification_text_response(message: Message, state: FSMContext, bot: 
         index: int = data.get("clarification_index", 0)
 
         if index < len(low_conf):
+            if not message.text:
+                await message.answer("⚠️ Пожалуйста, отправьте текстовое значение.")
+                return
             # Обновляем значение элемента
             low_conf[index]["clarified_value"] = message.text.strip()
             recognized_data["low_confidence_elements"] = low_conf
@@ -374,14 +385,13 @@ async def generate_and_send(message: Message, state: FSMContext, bot: Bot) -> No
 
         data = await state.get_data()
         recognized_data: dict = data.get("recognized_data", {})
-        user_id = message.from_user.id
+        user_id = data.get("user_id") or message.from_user.id
         timestamp = int(time.time())
 
         # ── Создаём папку outputs/ ────────────────────────────────────────
-        outputs_dir = os.path.join("outputs")
-        os.makedirs(outputs_dir, exist_ok=True)
+        os.makedirs(OUTPUTS_DIR, exist_ok=True)
 
-        base_name = os.path.join(outputs_dir, f"blueprint_{user_id}_{timestamp}")
+        base_name = os.path.join(OUTPUTS_DIR, f"blueprint_{user_id}_{timestamp}")
         svg_path = base_name + ".svg"
         dxf_path = base_name + ".dxf"
 
@@ -451,6 +461,14 @@ async def generate_and_send(message: Message, state: FSMContext, bot: Bot) -> No
                 logger.exception("Ошибка отправки DXF")
 
         logger.info("Файлы отправлены пользователю %s", user_id)
+
+        # ── Удаляем временные файлы с диска ──────────────────────────────
+        for tmp_path in [svg_path, dxf_path]:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except Exception:
+                    logger.warning("Не удалось удалить временный файл: %s", tmp_path)
 
     except Exception:
         logger.exception("Непредвиденная ошибка в generate_and_send для пользователя %s", message.from_user.id)

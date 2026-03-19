@@ -132,7 +132,8 @@ class SVGGenerator:
     def _save_drawing(self, dwg: svgwrite.Drawing, output_path: str) -> None:
         """Сохранить SVG-документ на диск."""
         try:
-            os.makedirs(os.path.dirname(output_path), exist_ok=True)
+            dir_path = os.path.dirname(os.path.abspath(output_path))
+            os.makedirs(dir_path, exist_ok=True)
             dwg.saveas(output_path)
             logger.debug("SVG сохранён: %s", output_path)
         except Exception as exc:

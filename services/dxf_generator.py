@@ -369,7 +369,8 @@ class DXFGenerator:
                 cx = room.get("center_x", 0) * scale
                 cy = room.get("center_y", 0) * scale
                 name = room.get("name", "")
-                area = room.get("area", 0)
+                area_raw = room.get("area")
+                area = float(area_raw) if area_raw is not None else 0.0
 
                 # Формат: «Кухня\n12.5 м²»
                 text = f"{name}\\P{area:.1f} м²" if name else f"{area:.1f} м²"

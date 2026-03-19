@@ -188,7 +188,7 @@ async def select_element_callback(callback: CallbackQuery, state: FSMContext) ->
 # ─────────────────────────────────────────
 
 @router.message(BlueprintStates.WAITING_CORRECTION)
-async def receive_correction(message: Message, state: FSMContext, bot) -> None:
+async def receive_correction(message: Message, state: FSMContext) -> None:
     """
     Принимает новое значение от пользователя, обновляет элемент в FSM
     и сохраняет исправление в БД.
@@ -227,12 +227,13 @@ async def receive_correction(message: Message, state: FSMContext, bot) -> None:
 
         # ── Сохраняем в БД ────────────────────────────────────────────────
         try:
+            blueprint_id = data.get("blueprint_id") or 0
+            db_elem_id = int(elem_id) if elem_id and str(elem_id).isdigit() else 0
             await db.save_correction(
-                user_id=message.from_user.id,
-                element_id=elem_id,
-                element_type=elem_type,
-                old_value=old_value,
-                new_value=new_value,
+                blueprint_id=blueprint_id,
+                element_id=db_elem_id,
+                original=str(old_value) if old_value is not None else "",
+                corrected=new_value,
             )
         except Exception:
             logger.exception("Ошибка сохранения исправления в БД")
