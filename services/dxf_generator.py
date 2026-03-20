@@ -40,7 +40,7 @@ class DXFGenerator:
         """Синхронная генерация DXF документа."""
         try:
             doc = ezdxf.new(dxfversion="R2010")
-            doc.units = ezdxf.units.MM
+            doc.header["$INSUNITS"] = 4  # 4 = millimeters
 
             self._setup_layers(doc)
 
@@ -117,19 +117,28 @@ class DXFGenerator:
             raise
 
     def _get_scale_factor(self, scale_str: str) -> float:
-        """Вернуть числовой коэффициент из строки масштаба вида '1:100'."""
+        """Вернуть числовой коэффициент из строки масштаба.
+
+        Поддерживает форматы: '1:100', '100', '1/100'.
+        Координаты от AI уже в реальных мм, поэтому возвращаем 1.0 —
+        масштаб нужен только если данные пришли в пикселях/процентах.
+        """
         try:
-            parts = str(scale_str).strip().split(":")
+            s = str(scale_str).strip()
+            parts = s.split(":")
             if len(parts) == 2:
                 numerator = float(parts[0])
                 denominator = float(parts[1])
-                if numerator > 0:
+                if numerator > 0 and denominator > 0:
                     return denominator / numerator
-            logger.warning(f"Неизвестный формат масштаба '{scale_str}', используется 1.0")
-            return 1.0
+            # Просто число — AI вернул только знаменатель, например "100"
+            val = float(s)
+            if val > 0:
+                return val
         except Exception as e:
             logger.error(f"Ошибка парсинга масштаба '{scale_str}': {e}")
-            return 1.0
+        # Координаты уже в мм — масштаб 1:1
+        return 1.0
 
     # ------------------------------------------------------------------
     # Стены
@@ -139,15 +148,13 @@ class DXFGenerator:
         """Нарисовать стены как прямоугольные LWPOLYLINE с учётом толщины."""
         for wall in walls:
             try:
-                x1 = wall["x1"] * scale
-                y1 = wall["y1"] * scale
-                x2 = wall["x2"] * scale
-                y2 = wall["y2"] * scale
-                thickness = wall.get("thickness", 200) * scale / scale  # уже в пикселях → мм через scale
+                # Поддержка обоих форматов: start_x/start_y/end_x/end_y и x1/y1/x2/y2
+                x1 = wall.get("start_x", wall.get("x1", 0))
+                y1 = wall.get("start_y", wall.get("y1", 0))
+                x2 = wall.get("end_x", wall.get("x2", 0))
+                y2 = wall.get("end_y", wall.get("y2", 0))
 
-                # Перевод пиксельной толщины в мм: thickness в данных в мм (относительно реального масштаба)
-                # thickness в JSON задана в мм реального размера, поэтому не умножаем на scale
-                half_t = wall.get("thickness", 200) / 2.0
+                half_t = wall.get("thickness_mm", wall.get("thickness", 200)) / 2.0
 
                 wall_type = wall.get("type", "partition")
                 layer = LAYER_WALLS_LOAD if wall_type == "load_bearing" else LAYER_WALLS_PART
@@ -185,11 +192,12 @@ class DXFGenerator:
         """Нарисовать двери: полотно (LINE) + дуга открывания (ARC)."""
         for door in doors:
             try:
-                x = door["x"] * scale
-                y = door["y"] * scale
-                width = door.get("width", 900)          # ширина в мм (реальная)
-                angle_deg = door.get("angle", 0)        # угол поворота проёма
-                swing = door.get("swing_direction", "left")
+                x = door.get("x", 0)
+                y = door.get("y", 0)
+                # Поддержка обоих полей: width_mm (новый формат) и width (старый)
+                width = door.get("width_mm", door.get("width", 900))
+                angle_deg = door.get("angle", 0)
+                swing = door.get("swing_direction", door.get("opening_direction", "left"))
 
                 # Полотно двери — горизонтальная линия от точки проёма
                 angle_rad = math.radians(angle_deg)
@@ -229,9 +237,9 @@ class DXFGenerator:
         """Нарисовать окна тремя параллельными линиями."""
         for window in windows:
             try:
-                x = window["x"] * scale
-                y = window["y"] * scale
-                width = window.get("width", 1500)       # ширина в мм (реальная)
+                x = window.get("x", 0)
+                y = window.get("y", 0)
+                width = window.get("width_mm", window.get("width", 1500))
 
                 # Глубина условного обозначения окна — 100 мм
                 depth = 100.0
@@ -288,11 +296,11 @@ class DXFGenerator:
         """Нарисовать лестницы горизонтальными ступенями."""
         for stair in stairs:
             try:
-                x = stair["x"] * scale
-                y = stair["y"] * scale
-                width = stair.get("width", 1200)        # ширина в мм
-                height = stair.get("height", 2400)      # длина марша в мм
-                steps = stair.get("steps_count", 12)
+                x = stair.get("x", 0)
+                y = stair.get("y", 0)
+                width = stair.get("width", 1200)
+                height = stair.get("height", 2400)
+                steps = stair.get("steps", stair.get("steps_count", 12))
                 direction = stair.get("direction", "up")
 
                 if steps <= 0:
@@ -363,17 +371,32 @@ class DXFGenerator:
     # ------------------------------------------------------------------
 
     def _draw_rooms(self, msp, rooms: list, scale: float) -> None:
-        """Нарисовать нумерацию и названия помещений через MTEXT."""
+        """Нарисовать контур и подпись каждого помещения."""
         for room in rooms:
             try:
-                cx = room.get("center_x", 0) * scale
-                cy = room.get("center_y", 0) * scale
-                name = room.get("name", "")
+                # Новый формат: x/y/width/height (левый нижний угол)
+                # Старый формат: center_x/center_y
+                if "x" in room and "width" in room:
+                    rx = room["x"]
+                    ry = room["y"]
+                    rw = room["width"]
+                    rh = room["height"]
+                    cx = rx + rw / 2.0
+                    cy = ry + rh / 2.0
+                    # Контур помещения
+                    msp.add_lwpolyline(
+                        [(rx, ry), (rx + rw, ry), (rx + rw, ry + rh), (rx, ry + rh)],
+                        close=True,
+                        dxfattribs={"layer": LAYER_WALLS_PART},
+                    )
+                else:
+                    cx = room.get("center_x", 0)
+                    cy = room.get("center_y", 0)
+
+                room_id = room.get("id", "")
                 area_raw = room.get("area")
                 area = float(area_raw) if area_raw is not None else 0.0
-
-                # Формат: «Кухня\n12.5 м²»
-                text = f"{name}\\P{area:.1f} м²" if name else f"{area:.1f} м²"
+                text = f"{room_id}\\P{area:.1f} м²" if room_id else f"{area:.1f} м²"
 
                 msp.add_mtext(
                     text,
