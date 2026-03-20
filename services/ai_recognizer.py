@@ -214,215 +214,66 @@ class AIRecognizer:
         """
         Составляет детальный prompt для распознавания российских строительных чертежей по ГОСТ.
         """
-        scale_instruction = (
-            f"Масштаб чертежа уже известен: {scale}. Используй его при вычислении реальных размеров в миллиметрах."
-            if scale
-            else (
-                "Масштаб чертежа: найди надпись вида 'Масштаб 1:X' или '1:X' на чертеже и запиши "
-                "в поле scale. Если не найдено — оставь null. "
-                "Все координаты и размеры рассчитывай с учётом найденного масштаба и возвращай в миллиметрах."
-            )
-        )
+        return """You are an expert at reading Russian architectural floor plan drawings (GOST standard).
 
-        few_shot_example = """Вот пример правильного результата распознавания.
-Здание 25000 x 19000 мм, масштаб 1:100. Начало координат — левый нижний угол здания.
+This is a TOP-DOWN VIEW floor plan drawing.
+You are looking at the building from above.
+All walls, rooms, doors and windows are shown as a 2D top-down projection.
 
-{
-  "floor": "1 ЭТАЖ",
-  "scale": "1:100",
-  "building_bounds": {
-    "min_x": 0, "min_y": 0, "max_x": 25000, "max_y": 19000,
-    "width_mm": 25000, "height_mm": 19000
-  },
-  "rooms": [
-    {"id": "1", "area": 12.4, "x": 0, "y": 14690, "width": 2880, "height": 4310, "confidence": 0.95},
-    {"id": "2", "area": 10.8, "x": 2880, "y": 14690, "width": 2850, "height": 4310, "confidence": 0.93},
-    {"id": "3", "area": 38.5, "x": 5730, "y": 9500, "width": 9000, "height": 4280, "confidence": 0.91}
-  ],
-  "walls": [
-    {"type": "load_bearing", "thickness_mm": 500, "start_x": 0, "start_y": 0, "end_x": 25000, "end_y": 0, "confidence": 0.97},
-    {"type": "load_bearing", "thickness_mm": 500, "start_x": 0, "start_y": 0, "end_x": 0, "end_y": 19000, "confidence": 0.97},
-    {"type": "partition", "thickness_mm": 150, "start_x": 2880, "start_y": 14690, "end_x": 2880, "end_y": 19000, "confidence": 0.92}
-  ],
-  "doors": [
-    {"x": 1200, "y": 14690, "width_mm": 900, "opening_direction": "inward_left", "confidence": 0.90},
-    {"x": 3500, "y": 14690, "width_mm": 800, "opening_direction": "inward_right", "confidence": 0.88}
-  ],
-  "windows": [
-    {"x": 500, "y": 19000, "width_mm": 1200, "confidence": 0.92},
-    {"x": 3200, "y": 19000, "width_mm": 1200, "confidence": 0.91}
-  ],
-  "stairs": [
-    {"type": "маршевая", "x": 12000, "y": 9500, "width": 3000, "height": 4000, "steps": 10}
-  ],
-  "dimensions": [
-    {"value": 2880, "unit": "mm", "confidence": 0.96},
-    {"value": 2850, "unit": "mm", "confidence": 0.95},
-    {"value": 9000, "unit": "mm", "confidence": 0.94}
-  ],
-  "unclear_elements": [
-    {"id": "u1", "type": "label", "description": "нечитаемая надпись", "x": 500, "y": 18500}
-  ]
-}"""
+STEP 1 - Find the scale:
+Look for text like "Масштаб 1:X" or "М 1:X".
+Extract the scale number X.
 
-        return f"""Ты — эксперт по распознаванию российских строительных чертежей поэтажных планов по ГОСТ.
+STEP 2 - Find building boundaries:
+Find the 4 outer corners of the entire building.
+Set bottom-left corner as point zero.
+X grows to the right, Y grows upward.
+All coordinates must be in real millimeters calculated using the scale.
 
-{few_shot_example}
+STEP 3 - Recognize walls:
+Find every wall segment in the drawing.
+Thick lines are load bearing walls, real thickness 380 to 600 millimeters.
+Thin lines are partition walls, real thickness 100 to 200 millimeters.
+Return start point, end point and thickness for each wall in millimeters.
 
-## КОНТЕКСТ: ОСОБЕННОСТИ РОССИЙСКИХ ЧЕРТЕЖЕЙ
+STEP 4 - Recognize rooms:
+Find every room on the plan.
+Red or pink numbers show room number and area in format "number/area" for example "1/12.6" means room 1 with area 12.6 square meters.
+Return room number, area, position and dimensions in millimeters for each room.
 
-Обязательно учитывай при распознавании:
-- Красные или розовые цифры — номер помещения и его площадь в формате "номер/площадьм²" (например "12/6.8")
-- Числа рядом со стенами и размерные линии — размеры в метрах или миллиметрах
-- ТОЛСТЫЕ линии (визуально жирные) — несущие стены толщиной 400–600 мм
-- ТОНКИЕ линии — перегородки толщиной 100–200 мм
-- Дуга у дверного проёма — дверь, направление дуги показывает сторону открывания
-- Три параллельные линии в проёме — окно
-- Сетка параллельных линий со ступенями — лестница
-- Надпись "Масштаб 1:X" или просто "1:X" — масштаб чертежа
-- Название этажа пишется крупно в верхней части чертежа (ПОДВАЛ, 1 ЭТАЖ, МАНСАРДА и т.д.)
+STEP 5 - Recognize doors:
+Find every door opening.
+A door is shown as an arc near a wall opening.
+The arc shows the direction the door opens.
+Return position, width and opening direction for each door in millimeters.
 
-## СИСТЕМА КООРДИНАТ (КАК В AUTOCAD)
+STEP 6 - Recognize windows:
+Find every window opening.
+A window is shown as three parallel lines inside a wall opening.
+Return position and width for each window in millimeters.
 
-КРИТИЧЕСКИ ВАЖНО — используй следующую систему координат:
-- Начало координат (0, 0) — это ЛЕВЫЙ НИЖНИЙ угол всего здания
-- Ось X направлена ВПРАВО (X растёт слева направо)
-- Ось Y направлена ВВЕРХ (Y растёт снизу вверх)
-- Все координаты возвращать строго в МИЛЛИМЕТРАХ с учётом масштаба чертежа
-- НЕ в процентах, НЕ в пикселях, НЕ в метрах — только в МИЛЛИМЕТРАХ
+STEP 7 - Recognize stairs:
+Find every staircase.
+Stairs are shown as a grid of parallel lines.
+Return position, dimensions and number of steps.
 
-## ТРЁХЭТАПНОЕ РАСПОЗНАВАНИЕ
+STEP 8 - Recognize dimensions:
+Find all dimension numbers next to walls.
+These are sizes in meters.
+Return each dimension value converted to millimeters.
 
-Этап 1 — найди название этажа и масштаб.
-{scale_instruction}
+STEP 9 - Self check:
+Calculate total building area from boundaries.
+Calculate sum of all room areas.
+If difference is more than 20 percent — recheck room boundaries and fix errors.
 
-Этап 2 — определи якорные точки (систему координат):
-Найди 4 угловые точки контура всего здания:
-  - левый нижний угол → это точка (0, 0)
-  - правый нижний угол → это точка (ширина_здания_мм, 0)
-  - левый верхний угол → это точка (0, высота_здания_мм)
-  - правый верхний угол → это точка (ширина_здания_мм, высота_здания_мм)
-Запиши эти значения в поле building_bounds.
-ВСЕ остальные координаты считай относительно этих якорных точек.
+STEP 10 - Unclear elements:
+Any element you are not confident about must be added to unclear list.
+Describe what it is and where it is located, write description in Russian.
 
-Этап 3 — распознай все элементы чертежа в абсолютных координатах (мм):
-- Каждое помещение: левый нижний угол (x, y), ширина и высота в мм
-- Все несущие стены и перегородки: начало (start_x, start_y) и конец (end_x, end_y) в мм
-- Все двери: точка на стене (x, y) в мм плюс ширина проёма
-- Все окна: точка на стене (x, y) в мм плюс ширина проёма
-- Лестницы
-- Размерные линии с числами
-
-## РАЗБИВКА ИЗОБРАЖЕНИЯ
-
-Если чертёж содержит много помещений (более 10), мысленно раздели изображение на 4 части:
-верхний-левый, верхний-правый, нижний-левый, нижний-правый.
-Внимательно проанализируй каждую часть отдельно, затем объедини результаты.
-Это поможет не пропустить мелкие элементы.
-
-## САМОПРОВЕРКА (ОБЯЗАТЕЛЬНО)
-
-После распознавания всех помещений выполни проверку:
-1. Вычисли сумму площадей всех помещений: S_сумма = сумма (width × height) для каждой комнаты
-2. Вычисли общую площадь здания: S_здание = building_bounds.width_mm × building_bounds.height_mm
-3. Если |S_сумма - S_здание| / S_здание > 0.20 (расхождение больше 20%) — это ошибка.
-   В таком случае пересмотри координаты помещений и пересчитай. Исправь результат перед возвратом.
-4. Запиши результат проверки в поле self_check.
-
-## УВЕРЕННОСТЬ
-
-Для каждого элемента с уверенностью ниже 0.7 — обязательно добавляй в unclear_elements.
-
-## ФОРМАТ ОТВЕТА
-
-Верни СТРОГО валидный JSON без какого-либо текста до или после него, без markdown-блоков (```).
-
-{{
-  "floor": "название этажа с чертежа или null",
-  "scale": "{scale if scale else 'найденный масштаб или null'}",
-  "building_bounds": {{
-    "min_x": 0,
-    "min_y": 0,
-    "max_x": ширина_здания_мм,
-    "max_y": высота_здания_мм,
-    "width_mm": ширина_здания_мм,
-    "height_mm": высота_здания_мм
-  }},
-  "self_check": {{
-    "rooms_area_sum_mm2": сумма_площадей_помещений,
-    "building_area_mm2": площадь_здания,
-    "discrepancy_percent": процент_расхождения,
-    "passed": true_или_false
-  }},
-  "rooms": [
-    {{
-      "id": "номер с чертежа",
-      "area": площадь_м2_или_null,
-      "x": левый_нижний_угол_x_мм,
-      "y": левый_нижний_угол_y_мм,
-      "width": ширина_мм,
-      "height": высота_мм,
-      "confidence": 0.95
-    }}
-  ],
-  "walls": [
-    {{
-      "type": "load_bearing или partition",
-      "thickness_mm": толщина,
-      "start_x": начало_x_мм,
-      "start_y": начало_y_мм,
-      "end_x": конец_x_мм,
-      "end_y": конец_y_мм,
-      "confidence": 0.95
-    }}
-  ],
-  "doors": [
-    {{
-      "x": позиция_x_мм,
-      "y": позиция_y_мм,
-      "width_mm": ширина_проёма,
-      "opening_direction": "inward_left или inward_right или outward_left или outward_right",
-      "confidence": 0.90
-    }}
-  ],
-  "windows": [
-    {{
-      "x": позиция_x_мм,
-      "y": позиция_y_мм,
-      "width_mm": ширина_проёма,
-      "confidence": 0.90
-    }}
-  ],
-  "stairs": [
-    {{
-      "type": "маршевая или винтовая",
-      "x": левый_нижний_угол_x_мм,
-      "y": левый_нижний_угол_y_мм,
-      "width": ширина_мм,
-      "height": высота_мм,
-      "steps": количество_ступеней_или_null
-    }}
-  ],
-  "dimensions": [
-    {{
-      "value": число_мм,
-      "unit": "mm",
-      "confidence": 0.95
-    }}
-  ],
-  "unclear_elements": [
-    {{
-      "id": "u1",
-      "type": "dimension или label или wall или door",
-      "description": "описание проблемы распознавания",
-      "x": позиция_x_мм,
-      "y": позиция_y_мм
-    }}
-  ]
-}}
-
-ВАЖНО: верни ТОЛЬКО валидный JSON. Никакого текста до или после. Никаких ``` блоков.
-"""
+Return result as valid JSON only.
+No explanations, no markdown, no extra text.
+Just the JSON object."""
 
     def _parse_response(self, response_text: str) -> dict:
         """
