@@ -99,11 +99,12 @@ python diagnose.py
 ```
 ✅ BOT_TOKEN: OK (bot: @myblueprint_bot)
 ✅ OPENROUTER_API_KEY: задан
-✅ google/gemini-2.0-flash-exp:free: доступна (ответ за 1.2с)
-❌ meta-llama/llama-3.2-11b-vision-instruct:free: 429 rate limit
+✅ google/gemma-3-27b-it:free: доступна (ответ за 1.4с)
+✅ nvidia/nemotron-nano-12b-v2-vl:free: доступна (ответ за 0.9с)
+❌ google/gemma-3-12b-it:free: 429 rate limit
 
-✅ Рекомендуемая модель: google/gemini-2.0-flash-exp:free
-   Укажите в .env: OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free
+✅ Рекомендуемая модель: google/gemma-3-27b-it:free
+   Укажите в .env: OPENROUTER_MODEL=google/gemma-3-27b-it:free
 ```
 
 Зависимости скрипта уже входят в `requirements.txt` (`python-dotenv`, `openai`).
@@ -117,7 +118,7 @@ pip install requests
 
 - Python 3.11+
 - aiogram 3.x
-- OpenRouter API (google/gemini-2.0-flash-exp:free)
+- OpenRouter API (google/gemma-3-27b-it:free)
 - OpenCV
 - ezdxf
 - svgwrite

@@ -20,6 +20,14 @@ from config import (
     CONFIDENCE_THRESHOLD,
 )
 
+# Бесплатные vision-модели на OpenRouter (в порядке приоритета)
+FALLBACK_MODELS = [
+    OPENROUTER_MODEL,
+    "google/gemma-3-27b-it:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "google/gemma-3-12b-it:free",
+]
+
 logger = logging.getLogger(__name__)
 
 
@@ -74,8 +82,8 @@ class AIRecognizer:
         # 2. Формируем prompt
         prompt_text = self._build_prompt(scale)
 
-        # 3. Вызываем OpenRouter API с retry при квоте
-        response_text = await self._call_with_retry(image_b64, prompt_text)
+        # 3. Вызываем OpenRouter API с fallback по моделям
+        response_text = await self._call_with_fallback(image_b64, prompt_text)
 
         if not response_text or not response_text.strip():
             raise AIServiceError("OpenRouter вернул пустой ответ.")
@@ -109,24 +117,47 @@ class AIRecognizer:
 
         return data
 
+    async def _call_with_fallback(
+        self,
+        image_b64: str,
+        prompt_text: str,
+    ) -> str:
+        """
+        Перебирает список моделей, для каждой делает до 3 попыток при rate limit.
+        """
+        errors: dict[str, str] = {}
+
+        for model_name in dict.fromkeys(FALLBACK_MODELS):
+            result = await self._call_with_retry(model_name, image_b64, prompt_text)
+            if result is not None:
+                self._active_model_name = model_name
+                return result
+            errors[model_name] = "см. лог выше"
+
+        error_details = "; ".join(f"{m}: недоступна" for m in errors)
+        logger.error("Все модели OpenRouter недоступны. %s", error_details)
+        raise AIServiceError(f"Все модели OpenRouter недоступны.\n{error_details}")
+
     async def _call_with_retry(
         self,
+        model_name: str,
         image_b64: str,
         prompt_text: str,
         max_retries: int = 3,
         base_delay: float = 10.0,
-    ) -> str:
+    ) -> str | None:
         """
-        Вызывает OpenRouter API с retry при ошибке квоты (429).
+        Вызывает одну модель с retry при rate limit (429).
+        При других ошибках (404, 403) сразу возвращает None для перехода к следующей.
         """
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(
                     "Отправка запроса к OpenRouter '%s' (попытка %d/%d)...",
-                    OPENROUTER_MODEL, attempt, max_retries,
+                    model_name, attempt, max_retries,
                 )
                 response = await self._client.chat.completions.create(
-                    model=OPENROUTER_MODEL,
+                    model=model_name,
                     messages=[
                         {
                             "role": "user",
@@ -147,33 +178,37 @@ class AIRecognizer:
                     temperature=0.1,
                     max_tokens=8192,
                 )
-                self._active_model_name = OPENROUTER_MODEL
-                logger.info("Ответ от OpenRouter получен успешно.")
+                logger.info("Ответ от OpenRouter получен успешно (модель: %s).", model_name)
                 return response.choices[0].message.content or ""
 
             except Exception as exc:
                 exc_str = str(exc)
                 is_quota = (
                     "429" in exc_str
-                    or "quota" in exc_str.lower()
                     or "rate limit" in exc_str.lower()
                     or "resource exhausted" in exc_str.lower()
                 )
+                is_unavailable = (
+                    "404" in exc_str
+                    or "No endpoints" in exc_str
+                    or "403" in exc_str
+                )
 
-                if is_quota and attempt < max_retries:
+                if is_unavailable:
+                    logger.warning("Модель '%s' недоступна: %s. Пробую следующую...", model_name, exc_str[:120])
+                    return None
+                elif is_quota and attempt < max_retries:
                     delay = base_delay * attempt
                     logger.warning(
-                        "Квота OpenRouter исчерпана (попытка %d/%d). Жду %.0f сек...",
-                        attempt, max_retries, delay,
+                        "Квота '%s' исчерпана (попытка %d/%d). Жду %.0f сек...",
+                        model_name, attempt, max_retries, delay,
                     )
                     await asyncio.sleep(delay)
                 else:
-                    logger.error("Ошибка OpenRouter API: %s", exc_str)
-                    raise AIServiceError(
-                        f"OpenRouter API недоступен (модель: {OPENROUTER_MODEL}). Ошибка: {exc_str}"
-                    ) from exc
+                    logger.error("Ошибка OpenRouter API '%s': %s", model_name, exc_str)
+                    return None
 
-        raise AIServiceError("OpenRouter API: все попытки исчерпаны.")
+        return None
 
     def _build_prompt(self, scale: Optional[str]) -> str:
         """
