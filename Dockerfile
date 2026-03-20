@@ -10,13 +10,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     && rm -rf /var/lib/apt/lists/*
 
-RUN wget -q "https://ftp.gnu.org/gnu/libredwg/libredwg-0.13.4.tar.xz" \
-    && tar xf libredwg-0.13.4.tar.xz \
-    && cd libredwg-0.13.4 \
+RUN wget -q "https://ftp.gnu.org/gnu/libredwg/libredwg-0.13.3.tar.xz" \
+    && tar xf libredwg-0.13.3.tar.xz \
+    && cd libredwg-0.13.3 \
     && ./configure --prefix=/usr/local \
     && make -j"$(nproc)" \
     && make install \
-    && rm -rf /libredwg-0.13.4 /libredwg-0.13.4.tar.xz
+    && rm -rf /libredwg-0.13.3 /libredwg-0.13.3.tar.xz
 
 # ─── Stage 2: production image ───────────────────────────────────────────────
 FROM python:3.11-slim
