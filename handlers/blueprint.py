@@ -24,6 +24,7 @@ from config import OUTPUTS_DIR
 from models.database import db
 from services.ai_recognizer import AIServiceError, ai_recognizer
 from services.dxf_generator import dxf_generator
+from services.dwg_converter import convert_dxf_to_dwg
 from services.image_processor import image_processor
 from services.svg_generator import SVGGenerator
 
@@ -448,22 +449,32 @@ async def generate_and_send(message: Message, state: FSMContext, bot: Bot) -> No
             except Exception:
                 logger.exception("Ошибка отправки SVG")
 
-        # ── Отправляем DXF как файл ───────────────────────────────────────
+        # ── Конвертируем DXF → DWG и отправляем ──────────────────────────
         if dxf_path and os.path.exists(dxf_path):
             try:
-                with open(dxf_path, "rb") as f:
-                    dxf_bytes = f.read()
-                await message.answer_document(
-                    BufferedInputFile(dxf_bytes, filename=f"blueprint_{timestamp}.dxf"),
-                    caption="📐 DXF-файл чертежа (AutoCAD)",
-                )
+                dwg_path = await convert_dxf_to_dwg(dxf_path)
+                if dwg_path and os.path.exists(dwg_path):
+                    with open(dwg_path, "rb") as f:
+                        dwg_bytes = f.read()
+                    await message.answer_document(
+                        BufferedInputFile(dwg_bytes, filename=f"blueprint_{timestamp}.dwg"),
+                        caption="📐 DWG-файл чертежа (AutoCAD)",
+                    )
+                else:
+                    with open(dxf_path, "rb") as f:
+                        dxf_bytes = f.read()
+                    await message.answer_document(
+                        BufferedInputFile(dxf_bytes, filename=f"blueprint_{timestamp}.dxf"),
+                        caption="📐 DXF-файл чертежа (AutoCAD)",
+                    )
             except Exception:
-                logger.exception("Ошибка отправки DXF")
+                logger.exception("Ошибка отправки DWG/DXF")
 
         logger.info("Файлы отправлены пользователю %s", user_id)
 
         # ── Удаляем временные файлы с диска ──────────────────────────────
-        for tmp_path in [svg_path, dxf_path]:
+        dwg_path_local = dxf_path.replace(".dxf", ".dwg") if dxf_path else None
+        for tmp_path in [svg_path, dxf_path, dwg_path_local]:
             if tmp_path and os.path.exists(tmp_path):
                 try:
                     os.unlink(tmp_path)
