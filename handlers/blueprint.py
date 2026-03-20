@@ -172,12 +172,12 @@ async def process_blueprint(message: Message, state: FSMContext, bot: Bot) -> No
         except AIServiceError as exc:
             logger.error("Ошибка AI-сервиса: %s", exc)
             error_hint = str(exc)
-            if "API_KEY" in error_hint.upper() or "api key" in error_hint.lower():
-                user_msg = "❌ Ошибка API-ключа Gemini. Проверьте GEMINI_API_KEY."
-            elif "quota" in error_hint.lower() or "429" in error_hint or "resource exhausted" in error_hint.lower():
-                user_msg = "❌ Превышена квота Gemini API (лимит бесплатного тарифа).\nПодождите 1–2 минуты и попробуйте снова."
-            elif "blocked" in error_hint.lower() or "unavailable" in error_hint.lower():
-                user_msg = "❌ Gemini API недоступен в вашем регионе или модель заблокирована."
+            if "API_KEY" in error_hint.upper() or "api key" in error_hint.lower() or "401" in error_hint:
+                user_msg = "❌ Ошибка API-ключа OpenRouter. Проверьте OPENROUTER_API_KEY."
+            elif "quota" in error_hint.lower() or "429" in error_hint or "rate limit" in error_hint.lower():
+                user_msg = "❌ Превышена квота OpenRouter API.\nПодождите 1–2 минуты и попробуйте снова."
+            elif "blocked" in error_hint.lower() or "unavailable" in error_hint.lower() or "403" in error_hint:
+                user_msg = "❌ OpenRouter API: доступ запрещён или модель недоступна."
             else:
                 user_msg = f"❌ Ошибка сервиса распознавания. Попробуйте позже.\n<code>{error_hint[:200]}</code>"
             await message.answer(user_msg, parse_mode="HTML")

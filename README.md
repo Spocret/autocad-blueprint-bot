@@ -33,12 +33,12 @@ pip install -r requirements.txt
 Скопируй `.env.example` в `.env` и заполни:
 ```
 BOT_TOKEN=токен_от_BotFather
-GEMINI_API_KEY=ключ_от_aistudio.google.com
+OPENROUTER_API_KEY=ключ_от_openrouter.ai
 DATABASE_PATH=blueprint_bot.db
 LOG_LEVEL=INFO
 ```
 
-Получите API ключ на aistudio.google.com
+Получите API ключ на [openrouter.ai/keys](https://openrouter.ai/keys)
 
 ### 5. Запуск
 ```bash
@@ -71,7 +71,7 @@ blueprint_bot/
 │   └── correction.py    # исправление элементов
 ├── services/            # сервисы
 │   ├── image_processor.py  # OpenCV обработка
-│   ├── ai_recognizer.py    # AI распознавание (Google Gemini API)
+│   ├── ai_recognizer.py    # AI распознавание (OpenRouter API)
 │   ├── svg_generator.py    # генерация SVG
 │   └── dxf_generator.py    # генерация DXF
 ├── models/
@@ -90,24 +90,23 @@ python diagnose.py
 
 Скрипт проверяет:
 
-- наличие `.env` и обязательных переменных (`BOT_TOKEN`, `GEMINI_API_KEY`)
+- наличие `.env` и обязательных переменных (`BOT_TOKEN`, `OPENROUTER_API_KEY`)
 - подключение к Telegram API (`getMe`)
-- доступность каждой модели Gemini (`gemini-2.5-flash`, `gemini-2.5-flash-lite`, `gemini-2.5-pro`)
+- доступность моделей через OpenRouter API
 
 Пример вывода:
 
 ```
 ✅ BOT_TOKEN: OK (bot: @myblueprint_bot)
-✅ GEMINI_API_KEY: задан
-✅ gemini-2.5-flash: доступна (ответ за 1.3с)
-✅ gemini-2.5-flash-lite: доступна (ответ за 0.9с)
-❌ gemini-2.5-pro: 403 permission denied — модель недоступна для вашего ключа
+✅ OPENROUTER_API_KEY: задан
+✅ google/gemini-2.0-flash-exp:free: доступна (ответ за 1.2с)
+❌ meta-llama/llama-3.2-11b-vision-instruct:free: 429 rate limit
 
-✅ Рекомендуемая модель: gemini-2.5-flash
-   Укажите в .env: GEMINI_MODEL=gemini-2.5-flash
+✅ Рекомендуемая модель: google/gemini-2.0-flash-exp:free
+   Укажите в .env: OPENROUTER_MODEL=google/gemini-2.0-flash-exp:free
 ```
 
-Зависимости скрипта уже входят в `requirements.txt` (`python-dotenv`, `google-generativeai`).
+Зависимости скрипта уже входят в `requirements.txt` (`python-dotenv`, `openai`).
 Дополнительно нужен `requests`:
 
 ```bash
@@ -118,7 +117,7 @@ pip install requests
 
 - Python 3.11+
 - aiogram 3.x
-- Google Gemini API (gemini-2.5-flash-preview-04-17)
+- OpenRouter API (google/gemini-2.0-flash-exp:free)
 - OpenCV
 - ezdxf
 - svgwrite

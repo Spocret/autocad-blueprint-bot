@@ -1,24 +1,24 @@
 """
-Сервис AI-распознавания архитектурных чертежей через Google Gemini API.
+Сервис AI-распознавания архитектурных чертежей через OpenRouter API.
 """
 
 import asyncio
+import base64
 import io
 import json
 import logging
 import re
 from typing import Optional
 
-import google.generativeai as genai
+from openai import AsyncOpenAI
 from PIL import Image
 
-from config import GEMINI_API_KEY, GEMINI_MODEL, CONFIDENCE_THRESHOLD
-
-GEMINI_FALLBACK_MODELS = [
-    GEMINI_MODEL,
-    "gemini-2.5-flash",
-    "gemini-2.5-flash-lite",
-]
+from config import (
+    OPENROUTER_API_KEY,
+    OPENROUTER_BASE_URL,
+    OPENROUTER_MODEL,
+    CONFIDENCE_THRESHOLD,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -29,17 +29,19 @@ class AIServiceError(Exception):
 
 
 class AIRecognizer:
-    """Распознаёт архитектурные чертежи с помощью Google Gemini Vision."""
+    """Распознаёт архитектурные чертежи через OpenRouter API."""
 
     def __init__(self):
-        """Инициализация клиента Google Gemini."""
-        if not GEMINI_API_KEY:
-            raise AIServiceError("GEMINI_API_KEY не задан в переменных окружения.")
+        """Инициализация клиента OpenRouter."""
+        if not OPENROUTER_API_KEY:
+            raise AIServiceError("OPENROUTER_API_KEY не задан в переменных окружения.")
         try:
-            genai.configure(api_key=GEMINI_API_KEY)
-            self.model = genai.GenerativeModel(GEMINI_MODEL)
-            self._active_model_name = GEMINI_MODEL
-            logger.info("AIRecognizer инициализирован: модель=%s", GEMINI_MODEL)
+            self._client = AsyncOpenAI(
+                api_key=OPENROUTER_API_KEY,
+                base_url=OPENROUTER_BASE_URL,
+            )
+            self._active_model_name = OPENROUTER_MODEL
+            logger.info("AIRecognizer инициализирован: модель=%s", OPENROUTER_MODEL)
         except Exception as exc:
             logger.exception("Ошибка инициализации AIRecognizer: %s", exc)
             raise AIServiceError(f"Не удалось инициализировать AIRecognizer: {exc}") from exc
@@ -58,55 +60,36 @@ class AIRecognizer:
         if not image_bytes:
             raise AIServiceError("Получены пустые байты изображения.")
 
-        # 1. Конвертируем bytes в PIL.Image для передачи в Gemini
+        # 1. Конвертируем bytes в JPEG и кодируем в base64
         try:
             pil_image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
             logger.debug("Изображение загружено через PIL, размер: %s", pil_image.size)
+            buf = io.BytesIO()
+            pil_image.save(buf, format="JPEG", quality=90)
+            image_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
         except Exception as exc:
-            logger.exception("Ошибка загрузки изображения через PIL: %s", exc)
-            raise AIServiceError(f"Не удалось загрузить изображение: {exc}") from exc
+            logger.exception("Ошибка подготовки изображения: %s", exc)
+            raise AIServiceError(f"Не удалось подготовить изображение: {exc}") from exc
 
         # 2. Формируем prompt
         prompt_text = self._build_prompt(scale)
 
-        # 3. Вызываем Gemini API с изображением (с fallback по моделям)
-        response = None
-        errors: dict[str, str] = {}
-
-        for model_name in dict.fromkeys(GEMINI_FALLBACK_MODELS):
-            response = await self._call_with_retry(model_name, pil_image, prompt_text, errors)
-            if response is not None:
-                self._active_model_name = model_name
-                logger.info("Ответ от Gemini получен успешно (модель: %s).", model_name)
-                break
-
-        if response is None:
-            error_details = "; ".join(f"{m}: {e}" for m, e in errors.items())
-            logger.error("Все модели Gemini недоступны. Детали: %s", error_details)
-            raise AIServiceError(
-                f"Все модели Gemini недоступны.\n{error_details}"
-            )
-
-        # 4. Извлекаем текст ответа
-        try:
-            response_text = response.text
-        except Exception as exc:
-            logger.error("Не удалось получить текст из ответа Gemini: %s", exc)
-            raise AIServiceError("Ответ Gemini пустой или имеет неожиданный формат.") from exc
+        # 3. Вызываем OpenRouter API с retry при квоте
+        response_text = await self._call_with_retry(image_b64, prompt_text)
 
         if not response_text or not response_text.strip():
-            raise AIServiceError("Gemini вернул пустой ответ.")
+            raise AIServiceError("OpenRouter вернул пустой ответ.")
 
         logger.debug("Сырой ответ модели (первые 500 символов): %s", response_text[:500])
 
-        # 5. Парсим JSON из ответа
+        # 4. Парсим JSON из ответа
         data = self._parse_response(response_text)
 
-        # 6. Если масштаб был передан явно — переписываем поле в ответе
+        # 5. Если масштаб был передан явно — переписываем поле в ответе
         if scale and not data.get("scale"):
             data["scale"] = scale
 
-        # 7. Определяем элементы с низким confidence и добавляем в low_confidence_elements
+        # 6. Определяем элементы с низким confidence
         data["low_confidence_elements"] = self._find_low_confidence(data)
 
         logger.info(
@@ -128,58 +111,73 @@ class AIRecognizer:
 
     async def _call_with_retry(
         self,
-        model_name: str,
-        pil_image,
+        image_b64: str,
         prompt_text: str,
-        errors: dict,
         max_retries: int = 3,
         base_delay: float = 10.0,
-    ):
+    ) -> str:
         """
-        Вызывает Gemini API с retry при ошибке квоты (429).
-        При других ошибках сразу записывает в errors и возвращает None.
+        Вызывает OpenRouter API с retry при ошибке квоты (429).
         """
         for attempt in range(1, max_retries + 1):
             try:
                 logger.info(
-                    "Отправка запроса к Gemini '%s' (попытка %d/%d)...",
-                    model_name, attempt, max_retries,
+                    "Отправка запроса к OpenRouter '%s' (попытка %d/%d)...",
+                    OPENROUTER_MODEL, attempt, max_retries,
                 )
-                model = genai.GenerativeModel(model_name)
-                response = await model.generate_content_async(
-                    [pil_image, prompt_text],
-                    generation_config=genai.GenerationConfig(
-                        temperature=0.1,
-                        max_output_tokens=8192,
-                    ),
+                response = await self._client.chat.completions.create(
+                    model=OPENROUTER_MODEL,
+                    messages=[
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}",
+                                    },
+                                },
+                                {
+                                    "type": "text",
+                                    "text": prompt_text,
+                                },
+                            ],
+                        }
+                    ],
+                    temperature=0.1,
+                    max_tokens=8192,
                 )
-                return response
+                self._active_model_name = OPENROUTER_MODEL
+                logger.info("Ответ от OpenRouter получен успешно.")
+                return response.choices[0].message.content or ""
+
             except Exception as exc:
                 exc_str = str(exc)
-                is_quota = "429" in exc_str or "quota" in exc_str.lower() or "resource exhausted" in exc_str.lower()
+                is_quota = (
+                    "429" in exc_str
+                    or "quota" in exc_str.lower()
+                    or "rate limit" in exc_str.lower()
+                    or "resource exhausted" in exc_str.lower()
+                )
 
                 if is_quota and attempt < max_retries:
                     delay = base_delay * attempt
                     logger.warning(
-                        "Квота Gemini '%s' исчерпана (попытка %d/%d). Жду %.0f сек...",
-                        model_name, attempt, max_retries, delay,
+                        "Квота OpenRouter исчерпана (попытка %d/%d). Жду %.0f сек...",
+                        attempt, max_retries, delay,
                     )
                     await asyncio.sleep(delay)
                 else:
-                    errors[model_name] = exc_str
-                    logger.warning("Модель '%s' недоступна: %s", model_name, exc_str)
-                    return None
-        return None
+                    logger.error("Ошибка OpenRouter API: %s", exc_str)
+                    raise AIServiceError(
+                        f"OpenRouter API недоступен (модель: {OPENROUTER_MODEL}). Ошибка: {exc_str}"
+                    ) from exc
+
+        raise AIServiceError("OpenRouter API: все попытки исчерпаны.")
 
     def _build_prompt(self, scale: Optional[str]) -> str:
         """
         Составляет детальный prompt для мультимодальной модели.
-
-        Аргументы:
-            scale: масштаб чертежа, если известен, иначе None.
-
-        Возвращает:
-            Строку с инструкцией для модели.
         """
         scale_instruction = (
             f"Масштаб чертежа: {scale}. Используй его при вычислении реальных размеров."
@@ -305,15 +303,6 @@ class AIRecognizer:
     def _parse_response(self, response_text: str) -> dict:
         """
         Извлекает и парсит JSON из ответа модели.
-
-        Обрабатывает случаи, когда модель оборачивает JSON в markdown-блоки (```json ... ```)
-        или добавляет посторонний текст.
-
-        Аргументы:
-            response_text: сырой текст ответа модели.
-
-        Возвращает:
-            Распарсенный словарь.
         """
         text = response_text.strip()
 
@@ -356,16 +345,9 @@ class AIRecognizer:
     def _find_low_confidence(self, data: dict) -> list[dict]:
         """
         Находит все элементы чертежа с confidence ниже порогового значения.
-
-        Аргументы:
-            data: словарь с распознанными элементами.
-
-        Возвращает:
-            Список словарей с описанием элементов с низким confidence.
         """
         low_confidence: list[dict] = []
 
-        # Типы элементов и их человекочитаемые названия
         element_groups = {
             "walls": "wall",
             "doors": "door",
@@ -398,7 +380,6 @@ class AIRecognizer:
                 if conf_value < CONFIDENCE_THRESHOLD:
                     element_id = element.get("id", "unknown")
 
-                    # Определяем причину низкого confidence
                     if element_type == "handwritten_note":
                         reason = "рукописный текст"
                     elif conf_value < 0.3:
@@ -408,7 +389,6 @@ class AIRecognizer:
                     else:
                         reason = "неоднозначная интерпретация элемента"
 
-                    # Вычисляем приблизительный bounding box
                     bbox = self._estimate_bbox(element, element_type)
 
                     low_confidence.append(
@@ -431,13 +411,6 @@ class AIRecognizer:
     def _estimate_bbox(self, element: dict, element_type: str) -> dict:
         """
         Вычисляет приблизительный bounding box элемента по его координатам.
-
-        Аргументы:
-            element: словарь с полями элемента.
-            element_type: тип элемента (wall, door, window и т.д.).
-
-        Возвращает:
-            Словарь с полями x, y, width, height в пикселях.
         """
         try:
             if element_type == "wall":
