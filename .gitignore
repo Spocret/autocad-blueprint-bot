@@ -24,6 +24,7 @@ env/
 
 # Output files
 outputs/
+output/
 
 # IDE
 .vscode/

@@ -1,85 +1,29 @@
 import json
 import logging
-import aiosqlite
+from datetime import datetime, timezone
 from typing import Optional
 
-from config import DATABASE_PATH
+from supabase import acreate_client, AsyncClient
+
+from config import SUPABASE_URL, SUPABASE_KEY
 
 logger = logging.getLogger(__name__)
 
 
 class Database:
-    def __init__(self, db_path: str):
-        self.db_path = db_path
-        self._conn: Optional[aiosqlite.Connection] = None
+    def __init__(self, url: str, key: str):
+        self.url = url
+        self.key = key
+        self._client: Optional[AsyncClient] = None
 
     async def init(self):
-        """Инициализация БД, создание таблиц если не существуют"""
+        """Инициализация подключения к Supabase"""
         try:
-            self._conn = await aiosqlite.connect(self.db_path)
-            self._conn.row_factory = aiosqlite.Row
-
-            await self._conn.executescript("""
-                PRAGMA journal_mode=WAL;
-                PRAGMA foreign_keys=ON;
-
-                CREATE TABLE IF NOT EXISTS sessions (
-                    id         INTEGER PRIMARY KEY AUTOINCREMENT,
-                    user_id    INTEGER NOT NULL,
-                    state      TEXT    DEFAULT 'WAITING_PHOTO',
-                    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS blueprints (
-                    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
-                    session_id           INTEGER REFERENCES sessions(id),
-                    user_id              INTEGER NOT NULL,
-                    floor_number         INTEGER DEFAULT 1,
-                    original_photo_path  TEXT,
-                    processed_photo_path TEXT,
-                    recognized_json      TEXT,
-                    svg_path             TEXT,
-                    dxf_path             TEXT,
-                    scale                TEXT,
-                    status               TEXT    DEFAULT 'pending',
-                    created_at           TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS elements (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    blueprint_id    INTEGER REFERENCES blueprints(id),
-                    element_type    TEXT,
-                    element_data    TEXT,
-                    confidence      REAL    DEFAULT 1.0,
-                    is_confirmed    INTEGER DEFAULT 0,
-                    user_correction TEXT,
-                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-
-                CREATE TABLE IF NOT EXISTS corrections (
-                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
-                    blueprint_id    INTEGER REFERENCES blueprints(id),
-                    element_id      INTEGER REFERENCES elements(id),
-                    original_value  TEXT,
-                    corrected_value TEXT,
-                    created_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-                );
-            """)
-            await self._conn.commit()
-            logger.info("База данных инициализирована: %s", self.db_path)
+            self._client = await acreate_client(self.url, self.key)
+            logger.info("Подключение к Supabase установлено")
         except Exception as e:
-            logger.exception("Ошибка инициализации БД: %s", e)
+            logger.exception("Ошибка подключения к Supabase: %s", e)
             raise
-
-    # ------------------------------------------------------------------
-    # Вспомогательный метод — преобразование aiosqlite.Row в dict
-    # ------------------------------------------------------------------
-    @staticmethod
-    def _row_to_dict(row: Optional[aiosqlite.Row]) -> Optional[dict]:
-        if row is None:
-            return None
-        return dict(row)
 
     # ------------------------------------------------------------------
     # Сессии
@@ -88,14 +32,14 @@ class Database:
     async def create_session(self, user_id: int) -> int:
         """Создать новую сессию для пользователя, вернуть session_id"""
         try:
-            async with self._conn.execute(
-                "INSERT INTO sessions (user_id) VALUES (?)",
-                (user_id,),
-            ) as cursor:
-                await self._conn.commit()
-                session_id = cursor.lastrowid
-                logger.debug("Создана сессия %d для пользователя %d", session_id, user_id)
-                return session_id
+            result = await (
+                self._client.table("sessions")
+                .insert({"user_id": user_id})
+                .execute()
+            )
+            session_id = result.data[0]["id"]
+            logger.debug("Создана сессия %d для пользователя %d", session_id, user_id)
+            return session_id
         except Exception as e:
             logger.exception("Ошибка создания сессии для пользователя %d: %s", user_id, e)
             raise
@@ -103,12 +47,15 @@ class Database:
     async def get_session(self, user_id: int) -> Optional[dict]:
         """Получить последнюю активную сессию пользователя"""
         try:
-            async with self._conn.execute(
-                "SELECT * FROM sessions WHERE user_id = ? ORDER BY created_at DESC LIMIT 1",
-                (user_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return self._row_to_dict(row)
+            result = await (
+                self._client.table("sessions")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .limit(1)
+                .execute()
+            )
+            return result.data[0] if result.data else None
         except Exception as e:
             logger.exception("Ошибка получения сессии пользователя %d: %s", user_id, e)
             raise
@@ -116,11 +63,13 @@ class Database:
     async def update_session_state(self, session_id: int, state: str):
         """Обновить состояние FSM для указанной сессии"""
         try:
-            await self._conn.execute(
-                "UPDATE sessions SET state = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?",
-                (state, session_id),
+            now = datetime.now(timezone.utc).isoformat()
+            await (
+                self._client.table("sessions")
+                .update({"state": state, "updated_at": now})
+                .eq("id", session_id)
+                .execute()
             )
-            await self._conn.commit()
             logger.debug("Сессия %d переведена в состояние '%s'", session_id, state)
         except Exception as e:
             logger.exception("Ошибка обновления состояния сессии %d: %s", session_id, e)
@@ -135,17 +84,21 @@ class Database:
     ) -> int:
         """Создать запись чертежа, вернуть blueprint_id"""
         try:
-            async with self._conn.execute(
-                "INSERT INTO blueprints (session_id, user_id, floor_number) VALUES (?, ?, ?)",
-                (session_id, user_id, floor_number),
-            ) as cursor:
-                await self._conn.commit()
-                blueprint_id = cursor.lastrowid
-                logger.debug(
-                    "Создан чертёж %d (сессия %d, пользователь %d, этаж %d)",
-                    blueprint_id, session_id, user_id, floor_number,
-                )
-                return blueprint_id
+            result = await (
+                self._client.table("blueprints")
+                .insert({
+                    "session_id": session_id,
+                    "user_id": user_id,
+                    "floor_number": floor_number,
+                })
+                .execute()
+            )
+            blueprint_id = result.data[0]["id"]
+            logger.debug(
+                "Создан чертёж %d (сессия %d, пользователь %d, этаж %d)",
+                blueprint_id, session_id, user_id, floor_number,
+            )
+            return blueprint_id
         except Exception as e:
             logger.exception("Ошибка создания чертежа: %s", e)
             raise
@@ -155,19 +108,16 @@ class Database:
         if not kwargs:
             return
         try:
-            # Сериализуем словари/списки в JSON-строки
             for key, value in list(kwargs.items()):
                 if isinstance(value, (dict, list)):
                     kwargs[key] = json.dumps(value, ensure_ascii=False)
 
-            set_clause = ", ".join(f"{col} = ?" for col in kwargs)
-            values = list(kwargs.values()) + [blueprint_id]
-
-            await self._conn.execute(
-                f"UPDATE blueprints SET {set_clause} WHERE id = ?",
-                values,
+            await (
+                self._client.table("blueprints")
+                .update(kwargs)
+                .eq("id", blueprint_id)
+                .execute()
             )
-            await self._conn.commit()
             logger.debug("Чертёж %d обновлён: %s", blueprint_id, list(kwargs.keys()))
         except Exception as e:
             logger.exception("Ошибка обновления чертежа %d: %s", blueprint_id, e)
@@ -176,12 +126,13 @@ class Database:
     async def get_blueprint(self, blueprint_id: int) -> Optional[dict]:
         """Получить чертёж по id"""
         try:
-            async with self._conn.execute(
-                "SELECT * FROM blueprints WHERE id = ?",
-                (blueprint_id,),
-            ) as cursor:
-                row = await cursor.fetchone()
-                return self._row_to_dict(row)
+            result = await (
+                self._client.table("blueprints")
+                .select("*")
+                .eq("id", blueprint_id)
+                .execute()
+            )
+            return result.data[0] if result.data else None
         except Exception as e:
             logger.exception("Ошибка получения чертежа %d: %s", blueprint_id, e)
             raise
@@ -189,12 +140,14 @@ class Database:
     async def get_user_blueprints(self, user_id: int) -> list[dict]:
         """Получить все чертежи пользователя, отсортированные по дате создания"""
         try:
-            async with self._conn.execute(
-                "SELECT * FROM blueprints WHERE user_id = ? ORDER BY created_at DESC",
-                (user_id,),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [self._row_to_dict(row) for row in rows]
+            result = await (
+                self._client.table("blueprints")
+                .select("*")
+                .eq("user_id", user_id)
+                .order("created_at", desc=True)
+                .execute()
+            )
+            return result.data or []
         except Exception as e:
             logger.exception("Ошибка получения чертежей пользователя %d: %s", user_id, e)
             raise
@@ -213,18 +166,22 @@ class Database:
         """Добавить элемент чертежа, вернуть element_id"""
         try:
             element_data_json = json.dumps(element_data, ensure_ascii=False)
-            async with self._conn.execute(
-                """INSERT INTO elements (blueprint_id, element_type, element_data, confidence)
-                   VALUES (?, ?, ?, ?)""",
-                (blueprint_id, element_type, element_data_json, confidence),
-            ) as cursor:
-                await self._conn.commit()
-                element_id = cursor.lastrowid
-                logger.debug(
-                    "Добавлен элемент %d (тип '%s', чертёж %d, уверенность %.2f)",
-                    element_id, element_type, blueprint_id, confidence,
-                )
-                return element_id
+            result = await (
+                self._client.table("elements")
+                .insert({
+                    "blueprint_id": blueprint_id,
+                    "element_type": element_type,
+                    "element_data": element_data_json,
+                    "confidence": confidence,
+                })
+                .execute()
+            )
+            element_id = result.data[0]["id"]
+            logger.debug(
+                "Добавлен элемент %d (тип '%s', чертёж %d, уверенность %.2f)",
+                element_id, element_type, blueprint_id, confidence,
+            )
+            return element_id
         except Exception as e:
             logger.exception("Ошибка добавления элемента в чертёж %d: %s", blueprint_id, e)
             raise
@@ -234,14 +191,16 @@ class Database:
     ) -> list[dict]:
         """Получить элементы чертежа с уверенностью ниже заданного порога"""
         try:
-            async with self._conn.execute(
-                """SELECT * FROM elements
-                   WHERE blueprint_id = ? AND confidence < ? AND is_confirmed = 0
-                   ORDER BY confidence ASC""",
-                (blueprint_id, threshold),
-            ) as cursor:
-                rows = await cursor.fetchall()
-                return [self._row_to_dict(row) for row in rows]
+            result = await (
+                self._client.table("elements")
+                .select("*")
+                .eq("blueprint_id", blueprint_id)
+                .lt("confidence", threshold)
+                .eq("is_confirmed", False)
+                .order("confidence", desc=False)
+                .execute()
+            )
+            return result.data or []
         except Exception as e:
             logger.exception(
                 "Ошибка получения элементов с низкой уверенностью для чертежа %d: %s",
@@ -252,11 +211,12 @@ class Database:
     async def confirm_element(self, element_id: int):
         """Пометить элемент как подтверждённый пользователем"""
         try:
-            await self._conn.execute(
-                "UPDATE elements SET is_confirmed = 1 WHERE id = ?",
-                (element_id,),
+            await (
+                self._client.table("elements")
+                .update({"is_confirmed": True})
+                .eq("id", element_id)
+                .execute()
             )
-            await self._conn.commit()
             logger.debug("Элемент %d подтверждён", element_id)
         except Exception as e:
             logger.exception("Ошибка подтверждения элемента %d: %s", element_id, e)
@@ -275,17 +235,22 @@ class Database:
     ):
         """Сохранить исправление пользователя и обновить поле user_correction у элемента"""
         try:
-            await self._conn.execute(
-                """INSERT INTO corrections (blueprint_id, element_id, original_value, corrected_value)
-                   VALUES (?, ?, ?, ?)""",
-                (blueprint_id, element_id, original, corrected),
+            await (
+                self._client.table("corrections")
+                .insert({
+                    "blueprint_id": blueprint_id,
+                    "element_id": element_id,
+                    "original_value": original,
+                    "corrected_value": corrected,
+                })
+                .execute()
             )
-            # Сохраняем последнее исправление прямо в записи элемента для быстрого доступа
-            await self._conn.execute(
-                "UPDATE elements SET user_correction = ?, is_confirmed = 1 WHERE id = ?",
-                (corrected, element_id),
+            await (
+                self._client.table("elements")
+                .update({"user_correction": corrected, "is_confirmed": True})
+                .eq("id", element_id)
+                .execute()
             )
-            await self._conn.commit()
             logger.debug(
                 "Исправление сохранено: элемент %d, чертёж %d", element_id, blueprint_id
             )
@@ -300,16 +265,15 @@ class Database:
     # ------------------------------------------------------------------
 
     async def close(self):
-        """Закрыть соединение с базой данных"""
+        """Закрыть соединение с Supabase"""
         try:
-            if self._conn:
-                await self._conn.close()
-                self._conn = None
-                logger.info("Соединение с БД закрыто")
+            if self._client:
+                await self._client.aclose()
+                self._client = None
+                logger.info("Соединение с Supabase закрыто")
         except Exception as e:
-            logger.exception("Ошибка при закрытии соединения с БД: %s", e)
-            raise
+            logger.exception("Ошибка при закрытии соединения с Supabase: %s", e)
 
 
 # Глобальный экземпляр базы данных
-db = Database(DATABASE_PATH)
+db = Database(SUPABASE_URL, SUPABASE_KEY)
